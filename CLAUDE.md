@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Language
+
+Always communicate with the user in Vietnamese (tiếng Việt). Code, comments, commit messages, PR titles/descriptions, and changelog entries remain in English to match upstream Teleport conventions.
+
 ## Repository overview
 
 Teleport is an identity-aware access proxy and CA for SSH, Kubernetes, databases, RDP, web apps, cloud consoles, and MCP servers. It ships as a single Go binary (`teleport`) plus user-facing CLIs (`tsh`, `tctl`, `tbot`), an Electron desktop app (Teleport Connect), and a React web UI served by the proxy.
@@ -86,3 +90,160 @@ All API/service definitions are in `proto/` and `api/proto/`. After any `.proto`
 ## Code-review focus (from AGENTS.md)
 
 When reviewing, ignore style and micro-perf. Surface: authz/authn bypasses, secret leakage, injection (SQL/command/template/path/SSRF), crypto misuse, privilege escalation, data corruption, concurrency races, and reliability regressions (panics, deadlocks, unbounded retries, nil derefs).
+
+---
+
+## Defensive engineering rules (mandatory)
+
+These rules counteract known model-degradation patterns. Violating any is a hard failure, not a style preference.
+
+### 1. Read-First Protocol
+- Read the target file + grep references BEFORE any Edit. Never edit a file you haven't read in this conversation.
+- For renames/refactors: grep usages across the codebase first (incl. `e_imports.go` for enterprise-only references).
+- Target Read:Edit ratio ≥ 5:1.
+
+### 2. No "simplest fix" shortcuts
+When you catch yourself thinking "the simplest approach is...", STOP. Evaluate at least 2 approaches and pick the CORRECT one, not the fastest.
+
+### 3. Surgical edits over rewrites
+- Default to Edit (search/replace), not Write, for existing files. Write only for new files or >70% rewrites — and explain why.
+- **Don't "improve" adjacent code** — no refactor of nearby code unless asked. AGPL header, import order, formatting of unrelated lines: leave alone.
+- **Match existing style** — quote style, naming, slog vs. fmt, error wrapping (`trace.Wrap`) of the surrounding file.
+- **Remove only your orphans** — clean up imports/vars you yourself orphaned; don't delete pre-existing dead code unless asked.
+- **Don't fix unrelated bugs** — mention them, don't fix them in scope.
+- Test: every changed line must trace directly to the user's request.
+
+### 4. Plan first, surface assumptions
+- Non-trivial task → write a short plan or spec before coding (goal + verify criteria + steps, 1 paragraph). Trivial → 1-2 line plan is fine.
+- State assumptions explicitly before implementing (format, scope, data shape).
+- Ambiguous request → present 2-3 interpretations and ask, don't silently choose.
+- If a simpler approach exists, propose it and push back when warranted.
+
+### 5. Simplicity first — do not overbuild
+- Minimum code that solves the asked problem. Nothing speculative.
+- No features beyond ask. No abstractions for single-use code. No "flexibility"/"configurability" not requested. No error handling for impossible scenarios.
+- **Half-length test**: if you can rewrite it in half the lines and still be correct, rewrite.
+- **<100 LOC heuristic** for typical tasks, **<1000 LOC** for complex features. Exceeding either is a signal of scope creep, premature abstraction, or solving the wrong problem.
+- Typical anti-pattern: a discount-calculation does NOT need a Strategy pattern + abstract base + config object — `calculate(amount, percent)` suffices. Refactor when complexity actually appears, not before.
+
+### 6. Follow project instructions
+- Re-read `AGENTS.md` (review guide), nearest `CLAUDE.md`, and any relevant `rfd/` design doc before non-trivial work.
+- Don't skip validation steps. Don't ignore conventions even when they look stylistic.
+
+### 7. Verify before claiming done — hawk-eye throughout
+- Hawk-eye DURING work, not only at the end. After each Edit: re-read the diff, check edge cases/assumptions/trade-offs, run lint/test mid-stream when changing multiple files. Never accept LLM/tool output blindly.
+- Run verification BEFORE saying "done":
+  - Go: `make lint-go GO_LINT_FLAGS='--new-from-rev=HEAD~'` and `go test -run TestName ./lib/path/...`
+  - Go (full unit suite for a package): `make test-go-unit SUBJECT=./lib/path/...`
+  - Protos: `make grpc` after `.proto` edits
+  - Web: `pnpm lint && pnpm type-check && pnpm test`
+- Transform vague tasks into verifiable goals: "fix bug X" → "write test reproducing X → make it pass → verify no regressions". "Add feature Y" → "tests for Y → implement → all pass".
+- **Goal-driven looping**: success criteria first (test passes / lint clean / specific output) → implement → run verify → fail → fix → retry. Never declare done from "my logic looks right"; declare done from verify-command evidence.
+
+### 8. Gather info, don't guess
+- When uncertain, READ MORE CODE instead of reasoning in circles.
+- If you write "oh wait" / "actually" / "let me reconsider" more than twice in a turn — stop talking, start reading.
+- Reasoning loops = insufficient context, not insufficient thinking.
+
+### 9. Codebase is the single source of truth
+- The codebase (Go source, `.proto`, `examples/chart/*/values.yaml`, terraform, helm) is authoritative for intent. Runtime/live state is a projection of it, not the reverse.
+- When you observe drift between live and code (a `kubectl patch` that's not in chart, a tctl resource that's not in YAML), surface and resolve it — don't silently work around.
+- Memory does not replace code. Before recommending from memory, verify the file/flag/symbol still exists via grep.
+- Canonical docs to keep in sync when changing related code:
+  - `README.md` (developer overview, build commands)
+  - `CHANGELOG.md` (per release)
+  - `docs/` (per product area — Teleport's user-facing docs)
+  - `rfd/` (new design doc when introducing/changing architecture)
+  - For a new audit event: the 5-place web-UI checklist in `web/README.md` PLUS `make audit-event-reference`
+
+### 10. Sub-agent decomposition — keep main context clean
+- Delegate research / exploration / multi-file survey to a sub-agent (`Agent` tool) to keep the main context tight.
+- Use sub-agents for: open-ended search >3 rounds, cross-file refactor impact analysis, parallel independent reads.
+- Don't use sub-agents when the target is already known (path/symbol) — direct `Read`/`Grep` is faster.
+- **Parallel when independent**: multiple `Agent` calls in **one message** to run concurrently. Sequential only when there's a data dependency.
+- **Brief like a new colleague**: state goal + known context + ruled-out paths + desired response format. Terse command-style prompts produce shallow generic work.
+- **Don't delegate understanding**: sub-agents return findings; the main agent synthesizes and decides. Never write "based on your findings, implement the fix" — that's delegating the judgment call.
+- **Trust but verify**: a sub-agent's summary describes intent, not execution. When it writes code, inspect the actual diff before reporting done.
+
+### 11. Code-review workflow — evidence + multi-angle fan-out
+Every PR must be **verifiable** and **auditable** before merge. Agent self-review is a blind spot; use an independent reviewer (different sub-agent or person) for agent-authored code.
+
+Scale review depth to size/criticality (also see Rule #5):
+
+| Scope | Checklist |
+|---|---|
+| <50 LOC + trivial (typo/doc/comment) | verify command + one-line "why" |
+| 50-300 LOC + normal feature/fix | pre-PR checklist (11.1) + careful test diff (11.2) |
+| >300 LOC OR security/auth/migration/RBAC/billing/cron/CI config/`e/` submodule | full + multi-angle fan-out (11.3) + ≥1 distinct AI reviewer (11.5) |
+
+#### 11.1 Pre-PR checklist
+- **Evidence**: paste real `command + output`. Not "ran tests, all pass" — that's not evidence.
+- **Decision log** (3-5 lines): assumptions surfaced, alternatives ruled out, concrete reason. Trivial PR can skip.
+- **Scope = PR description**: the diff touches only what the title/body promises. Orphan file changes → split or reject.
+- **Rollback plan**: 1-2 lines — revert command + the post-merge signal (metric, log, user report) that says it failed.
+- **Reproducibility**: for UI / integration / infra changes → run locally and paste output. For Teleport: `make integration` slice, `tsh` exercise, web UI screenshot.
+
+#### 11.2 Test review — read the test diff harder than the code diff
+Agents often "cheat to make tests pass" — this is the highest-value failure mode to catch. For each changed test, ask: "Does this test still FAIL if I plant a real bug in the implementation?" If unsure, plant the bug, run the test, confirm it fails.
+
+Reject immediately on any of:
+- **Loosened assertion**: `require.Equal(t, 5, x)` → `require.NotNil(t, x)`, `>0` → `>=0`
+- **Mock the whole module under test** — test becomes hollow
+- **Expected value modified to match buggy output** (test follows the bug, not the spec)
+- **New `t.Skip`/`SkipNow`/`@Ignore`/`it.skip`/`xit`** without an explicit ticket reason
+- **Swallowed errors** in test body (`if err != nil { return }` instead of `require.NoError(t, err)`)
+- **Happy path only** when the feature has error/edge branches
+- **Snapshot/golden file accepted without inspecting the diff content**
+- **Coverage threshold lowered** in CI config
+
+#### 11.3 Multi-angle fan-out (for ≥300 LOC or high-criticality)
+Spawn parallel sub-agents (Rule #10 — multiple `Agent` calls in one message), each with a **distinct** lens, no redundancy:
+- **Correctness** — logic bug, off-by-one, race, null/empty/oversize input, error path coverage
+- **Security** — injection (SQL/cmd/path/SSRF), auth bypass, secret leak (env/log), RBAC scope, crypto misuse, prompt-injection if LLM-adjacent
+- **Test quality** — anti-patterns from §11.2, coverage gap for new code paths
+- **Architecture** — consistency with codebase pattern, abstraction proportional to scope (no overkill)
+- **Performance** — N+1 query, blocking call in async/hot path, unbounded allocation, missing index
+
+Main agent then **synthesizes**: read all findings, dedupe overlaps, classify severity (block/warn/nit), reply on the PR with a summary plus raw per-angle findings attached. Never write "based on your findings, implement the fix" — Rule #10 forbids delegating understanding.
+
+#### 11.4 CI gating — necessary, not sufficient
+"CI green" validates what tests cover, not completeness. Watch for: skip-flaky-instead-of-fix, coverage threshold dropped, narrowed CI scope (unit only, no integration), mocking external deps so tests pass but prod won't.
+
+When diff touches `.github/workflows/*` or any CI config: read it carefully. Did the test suite shrink? Did a stage get skipped? Did a threshold drop?
+
+#### 11.5 Multi-reviewer protocol for high-stakes
+High-stakes = prod incident fix, security patch, data migration, cron schedule change, billing, multi-tenant isolation, RBAC, infrastructure (helm/terraform), anything under `lib/auth/*`, `lib/services/*`, or modifying `e/` integration points.
+
+- ≥1 distinct AI reviewer (different sub-agent prompt, or human). Diversity > redundancy.
+- Adversarially prompt: "**Default to refuted=true if uncertain**" — counters confirmation bias.
+- N=3 reviewers → a finding survives only with ≥2 agreement.
+- Human integrates and decides — no auto-merge from majority vote.
+
+## Code-intelligence workflow
+
+Understand structure BEFORE reading whole files; that makes Rule #1 fast.
+
+- **Grep + Glob + targeted Read** (default — always available)
+  - `Grep` 2-3 patterns to find usages, callers, references.
+  - `Glob` for related files by naming convention (`*_test.go`, `*.proto`, `*/fixtures/*`).
+  - `Read` with offset/limit — read the relevant section only.
+  - Target: structural understanding in <5 tool calls before any Edit.
+- Treat `e_imports.go` and `webassets_*.go` as the boundary between OSS and Enterprise/built-UI code paths.
+- For protos: `proto/` and `api/proto/` are the source of truth; `gen/` and `api/gen/` are derived — never hand-edit derived files.
+
+## Anti-pattern quick reference
+
+| Symptom while working | Rule violated | Correct action |
+|---|---|---|
+| Editing a file not Read in this session | #1 | Read first, grep references, then Edit |
+| Bug fix that also tweaks format/quote/import order | #3 | Touch only lines tied to the fix; restore the rest |
+| Silently assuming format/scope/page-size, then implementing | #4 | State the assumption; offer 2-3 interpretations; ask |
+| Strategy pattern / abstract base / config object for one use case | #5 | Direct function/method; refactor when a 2nd use case appears |
+| `try/except` (or `if err != nil { return }` swallow) for impossible cases | #5 | Remove; only catch errors that can actually occur |
+| Reporting "done" without running test/lint/build | #7 | Run verify, paste output, then report done |
+| Writing "oh wait"/"actually"/"let me reconsider" a third time in one turn | #8 | Stop reasoning, go read more code |
+| Assuming from memory/chat history without verifying current code | #9 | Trust codebase first; verify live/memory second |
+| Letting `README.md`/`docs/`/`rfd/` lag behind a change | #9 | Update doc in the same commit/PR |
+| Reading 20-30 files solo for a broad survey | #10 | Dispatch an `Explore`/`general-purpose` sub-agent |
+| Launching sub-agents sequentially for independent work | #10 | Multiple `Agent` calls in one message → parallel |
+| "Based on your findings, implement the fix" to a sub-agent | #10 | Sub-agent returns findings; main agent synthesizes and edits |
