@@ -219,6 +219,18 @@ High-stakes = prod incident fix, security patch, data migration, cron schedule c
 - N=3 reviewers → a finding survives only with ≥2 agreement.
 - Human integrates and decides — no auto-merge from majority vote.
 
+### 12. Verify identities from source — never infer one identifier from an adjacent value
+
+A system's **identity** (cluster_name, CA pin/fingerprint, host UUID, account/project/tenant ID, namespace, region, DB name) is NOT derivable from a **related-but-distinct** value (public address, DNS name, IP, proxy URL, repo name). They are different fields with different meanings — inferring one from the other is a hard failure, not a shortcut.
+
+- **Capture before you bake.** Before writing any identifier into config / plan / code / helm values, read its REAL value from the authoritative live source (`tctl status`, `kubectl get`, cloud console, the API) and cite the command + output in the plan/PR. Never type an identifier you have not verified this session.
+- **Address ≠ identity.** A public address/DNS name is what clients *connect to*; the cluster identity (`cluster_name`) is what *signs the CA*. Copying the address into an identity field silently generates a different trust root.
+- **Label the distinction.** In config + comments, mark which fields are addresses and which are identities, so the difference can't be lost in a later rename/refactor.
+- **"Preserve X" migrations need a loud gate.** When a migration claims to preserve an identity (CA, cluster_name), pin the source value and add a gate that FAILS LOUDLY on mismatch (e.g. CA-pin equality). That gate must NOT be skippable (`STAGING_MODE`, `--force`, `|| true`) on the one path where it is the last line of defense — a gate bypassed in the only run that would catch the error catches nothing.
+- **Trigger:** if you think "X is probably the same as Y", or you are about to copy an address into an identity field — STOP, read the source, verify.
+
+> Cautionary incident (2026-06-19): helm `clusterName` was set to the public address `teleport.x.vnshop.cloud` instead of the real `cluster_name: teleport.9ping.cloud` (plainly visible in `tctl status`). The K8s cluster therefore generated a fresh CA (pin `465e382b…` ≠ production `0bab7502…`); the staging dry-run had skipped GATE 1 via `STAGING_MODE=1`, so the mismatch was never caught. A premature DNS flip then pointed production at the empty, wrong-identity cluster — every existing agent/user cert would have been rejected. Root cause: an identity *inferred from an address* instead of *read from source*.
+
 ## Code-intelligence workflow
 
 Understand structure BEFORE reading whole files; that makes Rule #1 fast.
@@ -247,3 +259,5 @@ Understand structure BEFORE reading whole files; that makes Rule #1 fast.
 | Reading 20-30 files solo for a broad survey | #10 | Dispatch an `Explore`/`general-purpose` sub-agent |
 | Launching sub-agents sequentially for independent work | #10 | Multiple `Agent` calls in one message → parallel |
 | "Based on your findings, implement the fix" to a sub-agent | #10 | Sub-agent returns findings; main agent synthesizes and edits |
+| Copying an address/DNS name into an identity field (cluster_name, CA pin, host UUID) | #12 | Read the real identity from source (`tctl status`, console); cite it; label identity vs address |
+| Inferring "X is probably the same as Y" for an identifier, then baking it in | #12 | Verify the value from the live authoritative source before writing it anywhere |
