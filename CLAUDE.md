@@ -231,6 +231,24 @@ A system's **identity** (cluster_name, CA pin/fingerprint, host UUID, account/pr
 
 > Cautionary incident (2026-06-19): helm `clusterName` was set to the public address `teleport.x.vnshop.cloud` instead of the real `cluster_name: teleport.9ping.cloud` (plainly visible in `tctl status`). The K8s cluster therefore generated a fresh CA (pin `465e382b…` ≠ production `0bab7502…`); the staging dry-run had skipped GATE 1 via `STAGING_MODE=1`, so the mismatch was never caught. A premature DNS flip then pointed production at the empty, wrong-identity cluster — every existing agent/user cert would have been rejected. Root cause: an identity *inferred from an address* instead of *read from source*.
 
+### 13. Specs require empirical evidence; acceptance = mock + dry + real
+
+Every spec, plan, or design doc must include an **experiment with real data** for any claim that depends on real-world behavior (latency, throughput, payload shape, error rate, compatibility, identity equality, security boundary). Estimates, round numbers, or "should be fine" do not count — produce numbers from a run. Acceptance of the deliverable requires a **three-tier test stack** with logged evidence per tier.
+
+| Tier | Purpose | Examples |
+|---|---|---|
+| **Mock** | Fast feedback, isolate unit. | Go unit test with stubs, jest with mocked HTTP, contract tests |
+| **Dry-run** | Catch wiring errors without side-effects. | `helm --dry-run`, `terraform plan`, `tctl create --dry-run`, `kubectl apply --dry-run=server` |
+| **Empirical** | Real cluster/data with bounded blast radius; capture raw output. | Failover drill via hosts-override, staging exercise, `kubectl exec` into a real pod, `tctl status` post-apply, end-to-end smoke with real traffic |
+
+- **Applies to**: any spec / plan / design doc / non-trivial behavior change. Skip for typo/comment-only edits and pure refactors with no behavior change.
+- **Spec writing**: each behavioral claim ⇒ a `Verify` sub-section with `command run / dataset used / raw output captured / decision threshold / who-ran-when`. If a claim lacks empirical backing, prefix it `ASSUMPTION:` and lower its confidence visibly in the plan — do not bury it.
+- **Sign-off rule**: a deliverable is **accepted only when all three tiers PASS with logged evidence** pasted into the plan/PR. Dry-run pass alone ≠ ready — Rule #12's incident is the canonical failure mode: dry-run skipped via `STAGING_MODE=1`, real-data mismatch reached prod.
+- **Bounded blast radius for empirical**: hosts-override / `curl --resolve` / staging cluster / namespace with no real users / shadow traffic. Never use prod as the first empirical run for a destructive change.
+- **Trigger — HALT and demand real numbers**: round-number claim without measurement (`~5min`, `<1ms`, "should be fine"), "to be validated post-merge" / "will verify later", test plan with only unit tests for a behavior change, missing baseline metric, "looks reasonable" without captured output.
+
+> Positive example (2026-06-22, MR !17 HCM standby): the failover drill captured raw `tctl status` output proving `CA pin sha256:0bab7502… HCM==HNI` (GATE 1 PASS), exercised the toggle script both ways with per-pod verification, and noted a real-world finding (auth_preference cache lag ~10s) that became a runbook caveat. That is what empirical sign-off looks like; missing any of those = block.
+
 ## Code-intelligence workflow
 
 Understand structure BEFORE reading whole files; that makes Rule #1 fast.
@@ -261,3 +279,6 @@ Understand structure BEFORE reading whole files; that makes Rule #1 fast.
 | "Based on your findings, implement the fix" to a sub-agent | #10 | Sub-agent returns findings; main agent synthesizes and edits |
 | Copying an address/DNS name into an identity field (cluster_name, CA pin, host UUID) | #12 | Read the real identity from source (`tctl status`, console); cite it; label identity vs address |
 | Inferring "X is probably the same as Y" for an identifier, then baking it in | #12 | Verify the value from the live authoritative source before writing it anywhere |
+| Spec ships with round-number claims (`~5min`, `<1ms`) and no captured measurement | #13 | Run the experiment, paste `command + raw output`, set the threshold from the data |
+| Test plan = unit tests only for a behavior change (no dry-run, no empirical run) | #13 | Add `--dry-run` (catches wiring) + empirical exercise (real cluster/data) with logged output |
+| "Will verify after merge" / "to be validated post-merge" anywhere in the plan | #13 | Block merge; do the empirical run with bounded blast radius first, then merge |
